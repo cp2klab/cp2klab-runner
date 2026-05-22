@@ -1,0 +1,9 @@
+[main]
+api_token = your-runners-api-token
+base_dir = /scratch/your_project_path/runner-basedir
+
+[profiles]
+default = ./profiles/your-default-job-template.sh
+express = ./profiles/your-express-job-template.sh
+
+#EOF
