@@ -1,6 +1,8 @@
 #!/bin/bash
+
 #SBATCH -N {num_nodes}
 #SBATCH -t {walltime}
+#SBATCH {slurm_options}
 #SBATCH --exclusive
 #SBATCH --ntasks-per-node=32
 #SBATCH --cpus-per-task=4

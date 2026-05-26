@@ -6,12 +6,12 @@ The runner is installed in the computing center and from there it connects to th
 
 ## Installation
 
-1. Log in to your cluster's login node.
+1. Login to your cluster's **login node**.
 
 2. Download the software:
 
    ```shell
-   $ git clone https://github.com/cp2klab/cp2klab-runner.git .
+   $ git clone https://github.com/cp2klab/cp2klab-runner.git
    ```
 
 3. Copy the example config:
@@ -21,18 +21,19 @@ The runner is installed in the computing center and from there it connects to th
 
 4. Create a base directory on scratch for the runner to store its files.
 
-5. Check if there is already a suitable job template in [profiles/](./profiles/), or otherwise write your own:
+5. Check if there is already a suitable job template in the [templates/](./templates/) folder, or otherwise write your own:
     ```shell
     #!/bin/bash
     #SBATCH -N {num_nodes}
     #SBATCH -t {walltime}
+    #SBATCH {slurm_options}
     ...
     srun cp2k.psmp {in_file} &>> {out_file}
     ```
 
 6. Login to CP2K Lab and open the **Runners** app in the account menu at the top right corner.
 
-7. Click **Add new runner**, choose a new name, and click **Create runner**.
+7. Click **Add new runner**, choose a name, and click **Create runner**.
 
 8. Click **Copy token** on the newly created runner.
 

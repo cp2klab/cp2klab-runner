@@ -21,10 +21,6 @@ else:
     Literal = Union
     TypedDict = Dict
 
-# ======================================================================================
-USER_AGENT = "CP2K Lab runner 0.1"
-SLURM_JOB_FILENAME = "slurm-job.sh"
-
 
 # ======================================================================================
 class HelloResponse(TypedDict):
@@ -93,14 +89,39 @@ ResponseMessage = Union[SubmitResponse, ReportResponse, HelloResponse]
 
 
 # ======================================================================================
+class Profile:
+    def __init__(self, section: configparser.SectionProxy):
+        cp2k_template = section.get("cp2k_template")
+        assert cp2k_template
+        self.cp2k_template = Path(cp2k_template).read_text()
+        self.custom_args = {k: v or "" for k, v in section.items()}
+
+    def render_cp2k_slurm_file(self, request: SubmitRequest) -> str:
+        wallsecs = request["wallsecs"]
+        return self.cp2k_template.format(
+            in_file=request["in_file"],
+            out_file=request["out_file"],
+            walltime=f"{wallsecs//3600}:{wallsecs%3600//60:02d}:{wallsecs%60:02d}",
+            num_nodes=request["num_nodes"],
+            **self.custom_args,
+        )
+
+
+# ======================================================================================
 class RunnerConfig:  # dataclass not available before Python 3.7
     def __init__(
-        self, debug: bool, api_token: str, basedir: Path, profiles: Dict[str, str]
+        self, debug: bool, api_token: str, basedir: Path, profiles: Dict[str, Profile]
     ):
+        assert len(profiles) > 0
         self.debug = debug
         self.api_token = api_token
         self.basedir = basedir
         self.profiles = profiles
+        self.user_agent = "CP2K Lab runner 0.2"
+        self.slurm_job_filename = "slurm-job.sh"
+
+    def get_profile(self, name: Optional[str]) -> Profile:
+        return self.profiles[name] if name else list(self.profiles.values())[0]
 
 
 # ======================================================================================
@@ -112,18 +133,22 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
-    # Parse config and say hello to server.
+    # Parse config file.
     if not args.config.exists():
         print(f"Error: Config file {args.config} does not exists.")
         sys.exit(1)
-    configfile = configparser.ConfigParser()
-    configfile.read(args.config)  # fails silently when file doesn't exists
+    cfgfile = configparser.ConfigParser()
+    cfgfile.read(args.config)  # fails silently when file doesn't exists
     cfg = RunnerConfig(
         debug=args.debug,
-        api_token=configfile.get("main", "api_token"),
-        basedir=Path(configfile.get("main", "base_dir")),
-        profiles={k: Path(v).read_text() for k, v in configfile.items("profiles")},
+        api_token=cfgfile.get("main", "api_token"),
+        basedir=Path(cfgfile.get("main", "base_dir")),
+        profiles=dict(
+            (s[9:], Profile(cfgfile[s])) for s in cfgfile if s.startswith("profiles.")
+        ),
     )
+
+    # Say hello.
     send_message(cfg, HelloResponse(response="hello", profiles=list(cfg.profiles)))
     print("CP2K Lab Runner active :-)")
 
@@ -165,16 +190,9 @@ def handle_submit(cfg: RunnerConfig, request: SubmitRequest) -> None:
     # Write and upload slurm job file.
     external_id, error = "", ""
     try:
-        wallsecs = request["wallsecs"]
-        profile = request["profile"] or list(cfg.profiles)[0]
-        slurm_file_template = cfg.profiles[profile]
-        slurm_file_content = slurm_file_template.format(
-            in_file=request["in_file"],
-            out_file=request["out_file"],
-            walltime=f"{wallsecs//3600}:{wallsecs%3600//60:02d}:{wallsecs%60:02d}",
-            num_nodes=request["num_nodes"],
-        )
-        local_slurm_file = local_workdir / SLURM_JOB_FILENAME
+        profile = cfg.get_profile(request["profile"])
+        slurm_file_content = profile.render_cp2k_slurm_file(request)
+        local_slurm_file = local_workdir / cfg.slurm_job_filename
         local_slurm_file.write_text(slurm_file_content)
         upload_file(cfg, local_slurm_file)
     except:
@@ -291,7 +309,7 @@ def download_file(cfg: RunnerConfig, remote_path: str) -> None:
 # ======================================================================================
 def upload_workdir(cfg: RunnerConfig, local_workdir: Path) -> None:
     # Use mtime of slurm job file to track uploads.
-    local_slurm_file = local_workdir / SLURM_JOB_FILENAME
+    local_slurm_file = local_workdir / cfg.slurm_job_filename
     last_upload_time = local_slurm_file.stat().st_mtime
     local_slurm_file.touch()
 
@@ -348,7 +366,7 @@ def http_request(
 ) -> HTTPResponse:
 
     url = f"https://lab.cp2k.com/api/external/{url_path}"
-    headers = {"User-Agent": USER_AGENT, "Cookie": f"token={cfg.api_token};"}
+    headers = {"User-Agent": cfg.user_agent, "Cookie": f"token={cfg.api_token};"}
 
     if json_data:
         assert data is None

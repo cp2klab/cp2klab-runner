@@ -2,8 +2,12 @@
 api_token = your-runners-api-token
 base_dir = /scratch/your_project_path/runner-basedir
 
-[profiles]
-default = ./profiles/your-default-job-template.sh
-express = ./profiles/your-express-job-template.sh
+[profiles.normal]
+cp2k_template = ./templates/your-cp2k-template.sh
+slurm_options =
+
+[profiles.express]
+cp2k_template = ./templates/your-cp2k-template.sh
+slurm_options = -q express
 
 #EOF
