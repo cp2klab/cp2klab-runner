@@ -211,24 +211,24 @@ def start(cfg: RunnerConfig) -> None:
 
     # Main loop
     while True:
-        msg = get_message(cfg)
-        if not msg:
-            wait_for_message(cfg)
-
-        elif msg["request"] == "submit":
-            handle_submit(cfg, msg)
-
-        elif msg["request"] == "cancel":
-            handle_cancel(msg)
-
-        elif msg["request"] == "report":
-            handle_report(cfg, msg)
-
-        elif msg["request"] == "heartbeat":
-            pass  # nothing to do
-
-        else:
-            logger.error(f"Unprocessable message: {msg}")
+        try:
+            msg = get_message(cfg)
+            if not msg:
+                wait_for_message(cfg)
+            elif msg["request"] == "submit":
+                handle_submit(cfg, msg)
+            elif msg["request"] == "cancel":
+                handle_cancel(msg)
+            elif msg["request"] == "report":
+                handle_report(cfg, msg)
+            elif msg["request"] == "heartbeat":
+                pass  # nothing to do
+            else:
+                logger.error(f"Unprocessable message: {msg}")
+        except Exception as e:
+            logger.exception(e)
+            logger.info("Sleeping for 10 seconds.")
+            time.sleep(10)
 
 
 # ======================================================================================
