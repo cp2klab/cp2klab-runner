@@ -41,8 +41,12 @@ The runner is installed in the computing center and from there it connects to th
 
 10. Start the runner:
     ```shell
-    $ ./cp2klab-runner.py
-    CP2K Lab Runner active :-)
+    $ ./cp2klab-runner.py start
+    CP2K Lab Runner started.
     ```
 
-11. (optional) Use the [screen](https://help.ubuntu.com/community/Screen) command to keep the runner active after logout.
+11. (optional) Stop the runner when you are done.
+    ```shell
+    $ ./cp2klab-runner.py stop
+    CP2K Lab Runner stopped.
+    ```

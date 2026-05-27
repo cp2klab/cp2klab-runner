@@ -2,10 +2,15 @@
 
 # Copyright 2026 Ole Schütt. All Rights Reserved.
 
+import os
 import sys
 import json
 import gzip
+import time
+import atexit
+import signal
 import shutil
+import logging
 import argparse
 import traceback
 from subprocess import run, PIPE
@@ -20,6 +25,10 @@ if sys.version_info >= (3, 8):
 else:
     Literal = Union
     TypedDict = Dict
+
+logger = logging.getLogger(__name__)
+
+USER_AGENT = "CP2K Lab runner 0.3"
 
 
 # ======================================================================================
@@ -110,15 +119,21 @@ class Profile:
 # ======================================================================================
 class RunnerConfig:  # dataclass not available before Python 3.7
     def __init__(
-        self, debug: bool, api_token: str, basedir: Path, profiles: Dict[str, Profile]
+        self,
+        pid_file: Path,
+        log_file: Path,
+        api_token: str,
+        basedir: Path,
+        slurm_filename: str,
+        profiles: Dict[str, Profile],
     ):
         assert len(profiles) > 0
-        self.debug = debug
+        self.pid_file = pid_file
+        self.log_file = log_file
         self.api_token = api_token
         self.basedir = basedir
+        self.slurm_filename = slurm_filename
         self.profiles = profiles
-        self.user_agent = "CP2K Lab runner 0.2"
-        self.slurm_job_filename = "slurm-job.sh"
 
     def get_profile(self, name: Optional[str]) -> Profile:
         return self.profiles[name] if name else list(self.profiles.values())[0]
@@ -126,11 +141,13 @@ class RunnerConfig:  # dataclass not available before Python 3.7
 
 # ======================================================================================
 def main() -> None:
+    # Parse command line arguments.
     parser = argparse.ArgumentParser(description="CP2K Lab Runner")
     parser.add_argument(
-        "--config", type=Path, default=Path.cwd() / "cp2klab-runner.conf"
+        "-c", "--config", type=Path, default=Path.cwd() / "cp2klab-runner.conf"
     )
-    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("-d", "--debug", action="store_true")
+    parser.add_argument("command", help="start, stop, or restart")
     args = parser.parse_args()
 
     # Parse config file.
@@ -139,18 +156,58 @@ def main() -> None:
         sys.exit(1)
     cfgfile = configparser.ConfigParser()
     cfgfile.read(args.config)  # fails silently when file doesn't exists
+    profiles = {k[9:]: Profile(v) for k, v in cfgfile.items() if k[:9] == "profiles."}
     cfg = RunnerConfig(
-        debug=args.debug,
+        pid_file=args.config.with_suffix(".pid"),
+        log_file=args.config.with_suffix(".log"),
         api_token=cfgfile.get("main", "api_token"),
         basedir=Path(cfgfile.get("main", "base_dir")),
-        profiles=dict(
-            (s[9:], Profile(cfgfile[s])) for s in cfgfile if s.startswith("profiles.")
-        ),
+        slurm_filename=cfgfile.get("main", "slurm_filename", fallback="slurm-job.sh"),
+        profiles=profiles,
     )
+
+    # Configure logging.
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(filename=cfg.log_file, level=log_level)
+
+    # Run command.
+    if args.command == "start":
+        start(cfg)
+    elif args.command == "stop":
+        stop(cfg)
+    elif args.command == "restart":
+        stop(cfg)
+        start(cfg)
+    else:
+        print(f"Error: Command unknown. Valid commands are start, stop, and restart.")
+        sys.exit(1)
+
+
+# ======================================================================================
+def start(cfg: RunnerConfig) -> None:
+    if cfg.pid_file.exists():
+        print("CP2K Lab Runner is already active.")
+        sys.exit(1)
+
+    # Daemonize
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if os.fork() > 0:
+        print("CP2K Lab Runner started.")
+        sys.exit(0)
+    os.setsid()
+    cfg.pid_file.write_text(str(os.getpid()))
+    atexit.register(lambda: cfg.pid_file.unlink())
+
+    # Close standard file descriptors.
+    devnull = open(os.devnull, "a+")
+    os.dup2(devnull.fileno(), sys.stdin.fileno())
+    os.dup2(devnull.fileno(), sys.stdout.fileno())
+    os.dup2(devnull.fileno(), sys.stderr.fileno())
 
     # Say hello.
     send_message(cfg, HelloResponse(response="hello", profiles=list(cfg.profiles)))
-    print("CP2K Lab Runner active :-)")
+    logger.info("Runner started")
 
     # Main loop
     while True:
@@ -171,7 +228,26 @@ def main() -> None:
             pass  # nothing to do
 
         else:
-            print(f"Unprocessable message: {msg}")
+            logger.error(f"Unprocessable message: {msg}")
+
+
+# ======================================================================================
+def stop(cfg: RunnerConfig) -> None:
+    if not cfg.pid_file.exists():
+        print("CP2K Lab Runner was not active.")
+    else:
+        pid = int(cfg.pid_file.read_text())
+        try:
+            while True:
+                os.kill(pid, signal.SIGTERM)
+                time.sleep(0.1)
+        except OSError as err:
+            if "No such process" in str(err.args):
+                print("CP2K Lab Runner stopped.")
+                if cfg.pid_file.exists():
+                    cfg.pid_file.unlink()
+            else:
+                raise err
 
 
 # ======================================================================================
@@ -192,12 +268,11 @@ def handle_submit(cfg: RunnerConfig, request: SubmitRequest) -> None:
     try:
         profile = cfg.get_profile(request["profile"])
         slurm_file_content = profile.render_cp2k_slurm_file(request)
-        local_slurm_file = local_workdir / cfg.slurm_job_filename
+        local_slurm_file = local_workdir / cfg.slurm_filename
         local_slurm_file.write_text(slurm_file_content)
         upload_file(cfg, local_slurm_file)
-    except:
-        error = traceback.format_exc()
-        print(error)
+    except Exception as e:
+        logger.exception(e)
 
     if not error:
         # Invoke sbatch.
@@ -205,10 +280,10 @@ def handle_submit(cfg: RunnerConfig, request: SubmitRequest) -> None:
         p = run(cmd, cwd=local_workdir, check=False, stdout=PIPE, stderr=PIPE)
         if p.returncode == 0:
             external_id = p.stdout.decode("utf8").strip()
-            print(f"Submitted {external_id}")
+            logger.info(f"Submitted {external_id}")
         else:
             error = p.stderr.decode("utf8")
-            print(f"Command failed: {cmd}")
+            logger.error(f"Command failed: {cmd}")
 
     # Report back.
     response = SubmitResponse(
@@ -222,8 +297,8 @@ def handle_cancel(request: CancelRequest) -> None:
     cmd = ["scancel", request["external_id"]]
     p = run(cmd, check=False)
     if p.returncode != 0:
-        print(f"Command failed: {cmd}")
-    print(f"Canceled {request['external_id']}")
+        logger.error(f"Command failed: {cmd}")
+    logger.info(f"Canceled {request['external_id']}")
 
 
 # ======================================================================================
@@ -247,7 +322,7 @@ def get_job_state(external_id: str) -> Tuple[JobState, Optional[Path], int]:
     cmd = ["squeue", "--json", "-j", external_id]
     p = run(cmd, stdout=PIPE, check=False)
     if p.returncode != 0:
-        print(f"Command failed: {cmd}")
+        logger.error(f"Command failed: {cmd}")
         return "UNKNOWN", None, 0
 
     output = json.loads(p.stdout)
@@ -263,7 +338,7 @@ def get_job_state(external_id: str) -> Tuple[JobState, Optional[Path], int]:
     cmd = ["sacct", "--json", "-j", external_id]
     p = run(cmd, stdout=PIPE, check=False)
     if p.returncode != 0:
-        print(f"Command failed: {cmd}")
+        logger.error(f"Command failed: {cmd}")
         return "UNKNOWN", None, 0
 
     output = json.loads(p.stdout)
@@ -274,7 +349,7 @@ def get_job_state(external_id: str) -> Tuple[JobState, Optional[Path], int]:
         local_workdir = Path(slurm_job["working_directory"])
         return state, local_workdir, 0
 
-    print(f"Slurm could not find job {external_id}")
+    logger.error(f"Slurm could not find job {external_id}")
     return "UNKNOWN", None, 0
 
 
@@ -291,7 +366,7 @@ def parse_slurm_job_state(slurm_state: str) -> JobState:
     elif slurm_state == "CANCELLED":
         return "CANCELED"  # american english
     else:
-        print(f"Got unexpected slurm job state: {slurm_state}")
+        logger.error(f"Got unexpected slurm job state: {slurm_state}")
         return "UNKNOWN"
 
 
@@ -303,13 +378,13 @@ def download_file(cfg: RunnerConfig, remote_path: str) -> None:
     assert is_relative_to(local_path, cfg.basedir)
     local_path.parent.mkdir(exist_ok=True, parents=True)
     local_path.write_bytes(r.read())
-    print(f"Downloaded {local_path}")
+    logger.info(f"Downloaded {local_path}")
 
 
 # ======================================================================================
 def upload_workdir(cfg: RunnerConfig, local_workdir: Path) -> None:
     # Use mtime of slurm job file to track uploads.
-    local_slurm_file = local_workdir / cfg.slurm_job_filename
+    local_slurm_file = local_workdir / cfg.slurm_filename
     last_upload_time = local_slurm_file.stat().st_mtime
     local_slurm_file.touch()
 
@@ -327,13 +402,12 @@ def upload_file(cfg: RunnerConfig, local_path: Path) -> None:
     content = local_path.read_bytes()
     r = http_request(cfg, "POST", f"files/{remote_path}", data=content)
     assert r.status == 204
-    print(f"Uploaded {local_path}")
+    logger.info(f"Uploaded {local_path}")
 
 
 # ======================================================================================
 def send_message(cfg: RunnerConfig, message: ResponseMessage) -> None:
-    if cfg.debug:
-        print(f"Sending message: {message}")
+    logger.debug(f"Sending message: {message}")
     r = http_request(cfg, "POST", "message", json_data=message)
     assert r.status == 204
 
@@ -345,8 +419,7 @@ def get_message(cfg: RunnerConfig) -> Optional[RequestMessage]:
         return None
     assert r.status == 200
     message = cast(RequestMessage, json.load(r))
-    if cfg.debug:
-        print(f"Received message: {message}")
+    logger.debug(f"Received message: {message}")
     return message
 
 
@@ -366,7 +439,7 @@ def http_request(
 ) -> HTTPResponse:
 
     url = f"https://lab.cp2k.com/api/external/{url_path}"
-    headers = {"User-Agent": cfg.user_agent, "Cookie": f"token={cfg.api_token};"}
+    headers = {"User-Agent": USER_AGENT, "Cookie": f"token={cfg.api_token};"}
 
     if json_data:
         assert data is None
