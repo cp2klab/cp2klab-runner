@@ -272,6 +272,7 @@ def handle_submit(cfg: RunnerConfig, request: SubmitRequest) -> None:
         local_slurm_file.write_text(slurm_file_content)
         upload_file(cfg, local_slurm_file)
     except Exception as e:
+        error = traceback.format_exc()
         logger.exception(e)
 
     if not error:
