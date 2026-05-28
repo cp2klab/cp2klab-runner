@@ -18,7 +18,7 @@ import configparser
 from pathlib import Path
 from http.client import HTTPResponse
 from urllib.request import Request, urlopen
-from typing import Dict, List, Optional, Tuple, Union, cast
+from typing import Dict, List, Optional, Tuple, Union
 
 if sys.version_info >= (3, 8):
     from typing import Literal, TypedDict
@@ -27,8 +27,6 @@ else:
     TypedDict = Dict
 
 logger = logging.getLogger(__name__)
-
-USER_AGENT = "CP2K Lab runner 0.3"
 
 
 # ======================================================================================
@@ -168,7 +166,8 @@ def main() -> None:
 
     # Configure logging.
     log_level = logging.DEBUG if args.debug else logging.INFO
-    logging.basicConfig(filename=cfg.log_file, level=log_level)
+    format = "%(asctime)s %(levelname)-5s %(message)s"
+    logging.basicConfig(filename=cfg.log_file, level=log_level, format=format)
 
     # Run command.
     if args.command == "start":
@@ -374,7 +373,6 @@ def parse_slurm_job_state(slurm_state: str) -> JobState:
 # ======================================================================================
 def download_file(cfg: RunnerConfig, remote_path: str) -> None:
     r = http_request(cfg, "GET", f"files/{remote_path}")
-    assert r.status == 200
     local_path = (cfg.basedir / remote_path).resolve()
     assert is_relative_to(local_path, cfg.basedir)
     local_path.parent.mkdir(exist_ok=True, parents=True)
@@ -391,26 +389,34 @@ def upload_workdir(cfg: RunnerConfig, local_workdir: Path) -> None:
 
     # Find files in workdir that are younger than last_upload_time.
     for local_path in local_workdir.iterdir():
-        if local_path.is_file() and local_path != local_slurm_file:
-            if local_path.stat().st_mtime > last_upload_time:
-                upload_file(cfg, local_path)
+        try:
+            if local_path.is_file() and local_path != local_slurm_file:
+                if local_path.stat().st_mtime > last_upload_time:
+                    upload_file(cfg, local_path)
+        except FileNotFoundError:
+            logger.debug(f"File disappeared before it could be uploaded: {local_path}")
 
 
 # ======================================================================================
 def upload_file(cfg: RunnerConfig, local_path: Path) -> None:
     assert is_relative_to(local_path, cfg.basedir)
     remote_path = local_path.relative_to(cfg.basedir)
+    url_path = f"files/{remote_path}"
     content = local_path.read_bytes()
-    r = http_request(cfg, "POST", f"files/{remote_path}", data=content)
-    assert r.status == 204
-    logger.info(f"Uploaded {local_path}")
+    CHUNK_SIZE = 1_000_000  # 1 MB
+    nchunks = len(content) // CHUNK_SIZE + 1
+    for i in range(nchunks):
+        offset = i * CHUNK_SIZE
+        chunk = content[offset : min(offset + CHUNK_SIZE, len(content))]
+        method = "POST" if i == 0 else "PATCH"
+        http_request(cfg, method, url_path, data=chunk, upload_offset=offset)
+        logger.info(f"Uploaded {local_path} ({i + 1} / {nchunks})")
 
 
 # ======================================================================================
 def send_message(cfg: RunnerConfig, message: ResponseMessage) -> None:
     logger.debug(f"Sending message: {message}")
-    r = http_request(cfg, "POST", "message", json_data=message)
-    assert r.status == 204
+    http_request(cfg, "POST", "message", json_data=message)
 
 
 # ======================================================================================
@@ -418,16 +424,14 @@ def get_message(cfg: RunnerConfig) -> Optional[RequestMessage]:
     r = http_request(cfg, "GET", "message")
     if r.status == 204:
         return None
-    assert r.status == 200
-    message = cast(RequestMessage, json.load(r))
+    message: RequestMessage = json.load(r)
     logger.debug(f"Received message: {message}")
     return message
 
 
 # ======================================================================================
 def wait_for_message(cfg: RunnerConfig) -> None:
-    r = http_request(cfg, "GET", "wait")
-    assert r.status == 204
+    http_request(cfg, "GET", "wait")  # long polling - request takes up to 1 minute
 
 
 # ======================================================================================
@@ -437,10 +441,14 @@ def http_request(
     url_path: str,
     data: Optional[bytes] = None,
     json_data: Optional[ResponseMessage] = None,
+    upload_offset: Optional[int] = 0,
 ) -> HTTPResponse:
 
     url = f"https://lab.cp2k.com/api/external/{url_path}"
-    headers = {"User-Agent": USER_AGENT, "Cookie": f"token={cfg.api_token};"}
+    headers = {"User-Agent": "CP2K Lab Runner", "Cookie": f"token={cfg.api_token};"}
+
+    if upload_offset:
+        headers["Upload-Offset"] = str(upload_offset)  # inspired by https://tus.io
 
     if json_data:
         assert data is None
@@ -452,8 +460,13 @@ def http_request(
         headers["Content-Encoding"] = "gzip"
         headers["Content-Length"] = str(len(data))
 
-    response = urlopen(Request(url, headers=headers, data=data, method=method))
-    return cast(HTTPResponse, response)
+    r: HTTPResponse = urlopen(Request(url, headers=headers, data=data, method=method))
+
+    if r.status >= 400:
+        message = r.read(100).decode("utf8", errors="ignore")
+        raise Exception(f"Request {method} {url_path} failed: {r.status} {message}")
+
+    return r
 
 
 # ======================================================================================
