@@ -10,6 +10,7 @@ import time
 import atexit
 import signal
 import shutil
+import socket
 import logging
 import argparse
 import traceback
@@ -195,7 +196,7 @@ def start(cfg: RunnerConfig) -> None:
         print("CP2K Lab Runner started.")
         sys.exit(0)
     os.setsid()
-    cfg.pid_file.write_text(str(os.getpid()))
+    cfg.pid_file.write_text(f"{os.getpid()}@{socket.gethostname()}")
     atexit.register(lambda: cfg.pid_file.unlink())
 
     # Close standard file descriptors.
@@ -235,10 +236,13 @@ def stop(cfg: RunnerConfig) -> None:
     if not cfg.pid_file.exists():
         print("CP2K Lab Runner was not active.")
     else:
-        pid = int(cfg.pid_file.read_text())
+        pid, hostname = cfg.pid_file.read_text().split("@")
+        if hostname != socket.gethostname():
+            print(f"CP2K Lab Runner is active on a different host: {hostname}")
+            sys.exit(1)
         try:
             while True:
-                os.kill(pid, signal.SIGTERM)
+                os.kill(int(pid), signal.SIGTERM)
                 time.sleep(0.1)
         except OSError as err:
             if "No such process" in str(err.args):
