@@ -70,7 +70,9 @@ class ReportRequest(TypedDict):
 
 
 # ======================================================================================
-JobState = Literal["UNKNOWN", "QUEUING", "RUNNING", "SUCCEEDED", "CANCELED", "FAILED"]
+JobState = Literal[
+    "UNKNOWN", "QUEUING", "RUNNING", "SUCCEEDED", "CANCELED", "FAILED", "TIMEOUT"
+]
 
 
 # ======================================================================================
@@ -369,6 +371,8 @@ def parse_slurm_job_state(slurm_state: str) -> JobState:
         return "FAILED"
     elif slurm_state == "CANCELLED":
         return "CANCELED"  # american english
+    elif slurm_state == "TIMEOUT":
+        return "TIMEOUT"
     else:
         logger.error(f"Got unexpected slurm job state: {slurm_state}")
         return "UNKNOWN"
@@ -414,12 +418,12 @@ def upload_file(cfg: RunnerConfig, local_path: Path) -> None:
         chunk = content[offset : min(offset + CHUNK_SIZE, len(content))]
         method = "POST" if i == 0 else "PATCH"
         http_request(cfg, method, url_path, data=chunk, upload_offset=offset)
-        logger.info(f"Uploaded {local_path} ({i + 1} / {nchunks})")
+        logger.info(f"Uploaded {local_path} ({i + 1}/{nchunks})")
 
 
 # ======================================================================================
 def send_message(cfg: RunnerConfig, message: ResponseMessage) -> None:
-    logger.debug(f"Sending message: {message}")
+    logger.debug(f"Sending  message: {message}")
     http_request(cfg, "POST", "message", json_data=message)
 
 
